@@ -1,42 +1,53 @@
-# FuzzySystem.py
-# Tradução espelhada de EIFuzzCND.FuzzySystem.java
-
 import os
 import pandas as pd
+import numpy as np
+from scipy.io import arff
 from Phases.OfflinePhase import OfflinePhase
 from Phases.OnlinePhase import OnlinePhase
+from typing import List
 
 def main():
-    dataset = "rbf"
+    dataset = "rbf"  # mesmo nome do Java
     caminho = os.path.join(os.getcwd(), "datasets", dataset, "")
 
     # parâmetros
-    fuzzification = 2
-    alpha = 2
-    theta = 1
-    K = 4
-    kshort = 4
-    T = 40
-    minWeightOffline = 0
-    minWeightOnline = 15
-    latencia = [10000000]   # pode incluir outros valores como no Java
+    fuzzyfication: float = 2   # corrigido: mesmo nome que no Java
+    alpha: float = 2
+    theta: float = 1
+    K: int = 4
+    kshort: int = 4 #Número de clusters
+    T: int = 40
+    minWeightOffline: int = 0
+    minWeightOnline: int = 15
+    latencia: List[int] = [10000000]   # 2000, 5000, 10000, 10000000
     tChunk = 2000
-    ts = 200
-    phi = 0.2
-    percentLabeled = [1.0]
+    ts: int = 200
+    phi: float = 0.2
+    percentLabeled: List[float] = [1.0]
 
-    # carrega dataset em CSV (equivalente ao ARFF do Java)
-    train_path = os.path.join(caminho, dataset + "-train.csv")
+    # carrega dataset em ARFF (equivalente ao Java/Weka)
+    train_path = os.path.join(caminho, dataset + "-train.arff")
     print(f"Tentando carregar: {train_path}")
-    data = pd.read_csv(train_path).values  # Agora já vira numpy.ndarray
+    data_arff, meta = arff.loadarff(train_path)
+    df = pd.DataFrame(data_arff)
+
+    # separa atributos (X) e classe (y)
+    X = df.iloc[:, :-1].astype(float).values
+    # força conversão do rótulo nominal (bytes) -> string -> float
+    y = pd.to_numeric(df.iloc[:, -1].astype(str), errors="coerce").astype(float).values
+
+    # junta de volta no formato [features..., classValue]
+    data = np.column_stack([X, y])
+    print("Primeiras linhas processadas:")
+    print(data[:5])  # debug: veja se agora está [f1, f2, ..., class]
 
     for lat in latencia:
         for labeled in percentLabeled:
             condicaoSatisfeita = False
             while not condicaoSatisfeita:
                 # fase offline
-                offlinePhase = OfflinePhase(dataset, caminho, fuzzification, alpha, theta, K, minWeightOffline)
-                supervisedModel = offlinePhase.inicializar(data)  # passa o array, não o caminho
+                offlinePhase = OfflinePhase(dataset, caminho, fuzzyfication, alpha, theta, K, minWeightOffline)
+                supervisedModel = offlinePhase.inicializar(data)
 
                 # fase online
                 onlinePhase = OnlinePhase(
@@ -54,8 +65,8 @@ def main():
                 onlinePhase.initialize(dataset)
 
                 if onlinePhase.getTamConfusion() > 999:
-                    # no Java repetia a execução — aqui apenas logamos
-                    print("Reexecutando para mesma latência...")
+                    # mesma lógica do Java: repete
+                    continue
                 else:
                     condicaoSatisfeita = True
                     break

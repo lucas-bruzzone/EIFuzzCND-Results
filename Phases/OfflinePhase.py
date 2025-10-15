@@ -2,7 +2,7 @@ from Models.SupervisedModel import SupervisedModel
 import numpy as np
 
 class OfflinePhase:
-    def __init__(self, dataset, caminho, fuzzification, alpha, theta, K, minWeight):
+    def __init__(self, dataset: str, caminho: str, fuzzification: float, alpha: float, theta: float, K: int, minWeight: int):
         self.dataset = dataset
         self.caminho = caminho
         self.fuzzification = fuzzification

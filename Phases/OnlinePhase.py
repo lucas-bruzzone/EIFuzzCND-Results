@@ -1,280 +1,266 @@
+import random
+from typing import List, Set
 import numpy as np
-import pandas as pd
 
-from FuzzyFunctions.DistanceMeasures import calculaDistanciaEuclidiana
-from Structs.Example import Example
+from Models.SupervisedModel import SupervisedModel
 from Models.NotSupervisedModel import NotSupervisedModel
-from Output.HandlesFiles import HandlesFiles
-from ConfusionMatrix.ConfusionMatrix import ConfusionMatrix, Metrics
+from Structs.Example import Example
+from Structs.SPFMiC import SPFMiC
 from FuzzyFunctions.FuzzyFunctions import FuzzyFunctions
+from FuzzyFunctions.DistanceMeasures import calculaDistanciaEuclidiana
+from ConfusionMatrix.ConfusionMatrix import ConfusionMatrix
+from ConfusionMatrix.Metrics import Metrics
+from Output.HandlesFiles import HandlesFiles
+
+try:
+    from scipy.io import arff
+    import pandas as pd
+except ImportError:
+    arff = None
+    pd = None
 
 
 class OnlinePhase:
-    def __init__(self, caminho, supervisedModel, latencia, tChunk, T, kShort, phi, ts, minWeight, percentLabeled):
-        self.caminho = caminho
-        self.supervisedModel = supervisedModel
-        self.latencia = latencia
-        self.tChunk = tChunk
-        self.T = T
+    def __init__(self, caminho: str, supervisedModel: SupervisedModel, latencia: int, tChunk: int, T: int,
+                 kShort: int, phi: float, ts: int, minWeight: int, percentLabeled: float):
         self.kShort = kShort
-        self.phi = phi
         self.ts = ts
         self.minWeight = minWeight
+        self.T = T
+        self.caminho = caminho
+        self.latencia = latencia
+        self.tChunk = tChunk
+        self.supervisedModel = supervisedModel
         self.notSupervisedModel = NotSupervisedModel()
-        self.percentLabeled = percentLabeled
-
-        self.results = []
-        self.novelties = []
+        self.phi = phi
         self.existNovelty = False
         self.nPCount = 100.0
+        self.novelties: List[float] = []
+        self.percentLabeled = percentLabeled
+        self.results: List[Example] = []
         self.divisor = 1000
         self.tamConfusion = 0
 
     def initialize(self, dataset: str):
-        try:
-            # Carrega CSV equivalente ao "-instances.arff" do Java
-            df = pd.read_csv(self.caminho + dataset + "-instances.csv")
-            X = df.iloc[:, :-1].values
-            y_true = df.iloc[:, -1].values
+        # Intermediária
+        esperandoTempo = None
+        nExeTemp = 0
 
-            # Estruturas auxiliares
-            esperandoX = X
-            esperandoY = y_true
-            nExeTemp = 0
-            tempoLatencia = 0
+        # ConfusionMatrix
+        confusionMatrix = ConfusionMatrix()
+        confusionMatrixOriginal = ConfusionMatrix()
+        append = False
+        listaMetricas: List[Metrics] = []
 
-            # Matrizes de confusão
-            confusionMatrix = ConfusionMatrix()
-            confusionMatrixOriginal = ConfusionMatrix()
-            metrics_list = []
-            append = False
+        # Carrega .arff de forma equivalente ao DataSource do Weka
+        # Java: caminho + dataset + "-instances.arff"
+        path = f"{self.caminho}{dataset}-instances.arff"
+        if arff is None or pd is None:
+            raise RuntimeError("scipy.io.arff e pandas são necessários para ler ARFF.")
 
-            # Memórias
-            unkMem = []
-            labeledMem = []
-            trueLabels = set()
+        data_np, meta = arff.loadarff(path)
+        df = pd.DataFrame(data_np)
+        # Assume que a última coluna é a classe (como data.setClassIndex(numAttributes()-1))
+        values = df.values  # shape: (n, d)
+        data = values  # usando array numpy como 'Instances'
 
-            # Loop principal
-            for tempo in range(len(X)):
-                tempoLatencia += 1
+        # Intermediária
+        esperandoTempo = data
+        labeledMem: List[Example] = []
+        trueLabels: Set[float] = set()
+        unkMem: List[Example] = []
 
-                # Constrói Example do item corrente
-                row = X[tempo]
-                exemplo = Example(np.concatenate([row, [y_true[tempo]]]), True, tempo)
+        tempoLatencia = 0
+        for tempo in range(data.shape[0]):
+            ins_array = np.asarray(data[tempo], dtype=float)
 
-                # Classificação supervisionada
-                rotulo = self.supervisedModel.classifyNew(row, tempo)
+            # Cria Example com rótulo verdadeiro (última coluna)
+            exemplo = Example(ins_array, True, tempo)
+
+            # classifica com modelo supervisionado (Java passa Instance; aqui passamos o vetor)
+            rotulo = self.supervisedModel.classifyNew(ins_array, tempo)
+            exemplo.setRotuloClassificado(rotulo)
+
+            if (exemplo.getRotuloVerdadeiro() not in trueLabels) or \
+               (confusionMatrixOriginal.getNumberOfClasses() != self.tamConfusion):
+                trueLabels.add(exemplo.getRotuloVerdadeiro())
+                self.tamConfusion = confusionMatrixOriginal.getNumberOfClasses()
+
+            if rotulo == -1 or rotulo == -1.0:
+                rotulo = self.notSupervisedModel.classify(exemplo, self.supervisedModel.K, tempo)
                 exemplo.setRotuloClassificado(rotulo)
-
-                # Gestão do conjunto de classes verdadeiras
-                if (exemplo.getRotuloVerdadeiro() not in trueLabels) or (confusionMatrixOriginal.getNumberOfClasses() != self.tamConfusion):
-                    trueLabels.add(exemplo.getRotuloVerdadeiro())
-                    self.tamConfusion = confusionMatrixOriginal.getNumberOfClasses()
-                    # (no Java poderia salvar/atualizar matriz original aqui)
-
-                # Se outlier (-1), tenta classificar com não supervisionado
                 if rotulo == -1 or rotulo == -1.0:
-                    rotulo_ns = self.notSupervisedModel.classify(exemplo, float(self.supervisedModel.K), tempo)
-                    exemplo.setRotuloClassificado(rotulo_ns)
+                    unkMem.append(exemplo)
+                    if len(unkMem) >= self.T:
+                        unkMem = self.multiClassNoveltyDetection(unkMem, tempo, confusionMatrix, confusionMatrixOriginal)
 
-                    # Continua desconhecido → vai para unkMem e tenta ND
-                    if rotulo_ns == -1 or rotulo_ns == -1.0:
-                        unkMem.append(exemplo)
-                        if len(unkMem) >= self.T:
-                            unkMem = self.multiClassNoveltyDetection(
-                                unkMem, tempo, confusionMatrix, confusionMatrixOriginal
-                            )
+            self.results.append(exemplo)
+            confusionMatrix.addInstance(exemplo.getRotuloVerdadeiro(), exemplo.getRotuloClassificado())
+            # confusionMatrixOriginal.addInstance(...)
 
-                # Atualiza resultados e matriz de confusão
-                self.results.append(exemplo)
-                confusionMatrix.addInstance(exemplo.getRotuloVerdadeiro(), exemplo.getRotuloClassificado())
-                # confusionMatrixOriginal.addInstance(... ) // igual ao Java, está comentado
+            tempoLatencia += 1
+            if tempoLatencia >= self.latencia:
+                if (random.random() < self.percentLabeled) or (len(labeledMem) == 0):
+                    labeledExample = Example(esperandoTempo[nExeTemp], True, tempo)
+                    labeledMem.append(labeledExample)
 
-                # Lógica de latência (espelhando Java: usa acumulador tempoLatencia e nExeTemp)
-                if tempoLatencia >= self.latencia:
-                    # Com probabilidade ou se labeledMem está vazia, push um rotulado da fila "esperando"
-                    if (np.random.rand() < self.percentLabeled) or (len(labeledMem) == 0):
-                        # Em Java: Example(esperandoTempo.get(nExeTemp).toDoubleArray(), true, tempo)
-                        if nExeTemp < len(esperandoX):
-                            arr = np.concatenate([esperandoX[nExeTemp], [esperandoY[nExeTemp]]])
-                            labeledExample = Example(arr, True, tempo)
-                            labeledMem.append(labeledExample)
+                if len(labeledMem) >= self.tChunk:
+                    labeledMem = self.supervisedModel.trainNewClassifier(labeledMem, tempo)
+                    labeledMem.clear()
 
-                    # Treina incrementalmente quando acumula tChunk
-                    if len(labeledMem) >= self.tChunk:
-                        labeledMem = self.supervisedModel.trainNewClassifier(labeledMem, tempo)
-                        labeledMem.clear()
+                nExeTemp += 1
 
-                    nExeTemp += 1
-                    # OBS: Java NÃO zera tempoLatencia (após alcançar latência roda sempre esse bloco).
-                    # Para espelhar exatamente, NÃO resetamos.
+            self.supervisedModel.removeOldSPFMiCs(self.latencia + self.ts, tempo)
+            # self.notSupervisedModel.removeOldSPFMiCs(self.latencia + self.ts, tempo)
+            self.removeOldUnknown(unkMem, self.ts, tempo)  # manter o “bug” de ignorar retorno, como no Java
 
-                # Remoção de SPFMiCs antigos
-                self.supervisedModel.removeOldSPFMiCs(self.latencia + self.ts, tempo)
-                # notSupervisedModel.removeOldSPFMiCs(...) está comentado no Java
+            # Métricas a cada 'divisor'
+            if (tempo > 0) and (tempo % int(self.divisor) == 0):
+                confusionMatrix.mergeClasses(confusionMatrix.getClassesWithNonZeroCount())
+                metrics: Metrics = confusionMatrix.calculateMetrics(tempo, confusionMatrix.countUnknow(), self.divisor)
+                print(f"Tempo:{tempo} Acurácia: {metrics.getAccuracy()} Precision: {metrics.getPrecision()}")
+                listaMetricas.append(metrics)
 
-                # Remove/filtra unknowns conforme regra Java (mantém ct - time >= ts)
-                unkMem = self.removeOldUnknown(unkMem, self.ts, tempo)
-
-                # Métricas periódicas
-                if (tempo > 0) and (tempo % self.divisor == 0):
-                    # No Java: confusionMatrix.mergeClasses(confusionMatrix.getClassesWithNonZeroCount());
-                    confusionMatrix.mergeClasses(confusionMatrix.getClassesWithNonZeroCount())
-                    metrics = confusionMatrix.calculateMetrics(tempo, confusionMatrix.countUnknow(), self.divisor)
-                    print(f"Tempo:{tempo} Acurácia: {metrics.getAccuracy()} Precision: {metrics.getPrecision()}")
-                    metrics_list.append(metrics)
-                    self.novelties.append(1.0 if self.existNovelty else 0.0)
+                if self.existNovelty:
+                    self.novelties.append(1.0)
                     self.existNovelty = False
+                else:
+                    self.novelties.append(0.0)
 
-            # Salva métricas/resultados (como no Java)
-            for metrica in metrics_list:
-                HandlesFiles.salvaMetrics(
-                    int(metrica.getTempo() / self.divisor),
-                    metrica.getAccuracy(),
-                    metrica.getPrecision(),
-                    metrica.getRecall(),
-                    metrica.getF1Score(),
-                    dataset,
-                    self.latencia,
-                    self.percentLabeled,
-                    metrica.getUnkMem(),
-                    metrica.getUnknownRate(),
-                    append
-                )
-                append = True
-
-            HandlesFiles.salvaNovidades(self.novelties, dataset, self.latencia, self.percentLabeled)
-            HandlesFiles.salvaResultados(self.results, dataset, self.latencia, self.percentLabeled)
-
-        except Exception as e:
-            raise RuntimeError(e)
-
-    def multiClassNoveltyDetection(self, listaDesconhecidos, tempo, confusionMatrix, confusionMatrixOriginal):
-        # Espelha o Java: roda apenas se #desconhecidos > kShort
-        if len(listaDesconhecidos) > self.kShort:
-
-            # FCM nos desconhecidos
-            cntr, u = FuzzyFunctions.fuzzyCMeans(listaDesconhecidos, self.kShort, self.supervisedModel.fuzzification)
-
-            # Silhuetas (em Python usamos a matriz de pertinência)
-            silhuetas = FuzzyFunctions.fuzzySilhouette(u, listaDesconhecidos, self.supervisedModel.alpha)
-
-            # Tamanho de cada cluster (equivalente a centroid.getPoints().size())
-            winners = np.argmax(u, axis=0)                 # vencedor por exemplo
-            counts_per_cluster = np.bincount(winners, minlength=self.kShort)
-
-            # Índices de clusters válidos (silhueta > 0 e tamanho >= minWeight)
-            silhuetasValidas = [i for i, s in enumerate(silhuetas) if (s > 0) and (counts_per_cluster[i] >= self.minWeight)]
-
-            # SPFMiCs para os desconhecidos (igual ao Java: versão "newSeparate...")
-            sfMiCS = FuzzyFunctions.newSeparateExamplesByClusterClassifiedByFuzzyCMeans(
-                listaDesconhecidos, cntr, u, -1.0, self.supervisedModel.alpha,
-                self.supervisedModel.theta, self.minWeight, tempo
+        for metrica in listaMetricas:
+            # no Java: metrica.getTempo()/divisor depois cast para int
+            tempo_idx = int(metrica.getTempo() / self.divisor)
+            HandlesFiles.salvaMetrics(
+                tempo_idx,
+                metrica.getAccuracy(),
+                metrica.getPrecision(),
+                metrica.getRecall(),
+                metrica.getF1Score(),
+                dataset,
+                self.latencia,
+                self.percentLabeled,
+                metrica.getUnkMem(),
+                metrica.getUnknownRate(),
+                append
             )
+            append = True
 
-            # Todos os microrregiões conhecidos
-            sfmicsConhecidos = self.supervisedModel.getAllSPFMiCs()
+        HandlesFiles.salvaNovidades(self.novelties, dataset, self.latencia, self.percentLabeled)
+        HandlesFiles.salvaResultados(self.results, dataset, self.latencia, self.percentLabeled)
 
-            # Para cada cluster válido, decidir se é conhecido (FR <= phi) ou novidade
-            for i in range(len(cntr)):
+    def multiClassNoveltyDetection(self, listaDesconhecidos: List[Example], tempo: int,
+                                   confusionMatrix: ConfusionMatrix,
+                                   confusionMatrixOriginal: ConfusionMatrix) -> List[Example]:
+        if len(listaDesconhecidos) > self.kShort:
+            clusters = FuzzyFunctions.fuzzyCMeans(listaDesconhecidos, self.kShort, self.supervisedModel.fuzzification)
+            centroides = clusters.getClusters()
+            silhuetas = FuzzyFunctions.fuzzySilhouette(clusters, listaDesconhecidos, self.supervisedModel.alpha)
+            silhuetasValidas: List[int] = []
 
-                # Em Java: if (silhuetasValidas.contains(i) && !sfMiCS.get(i).isNull())
-                if (i in silhuetasValidas) and (i < len(sfMiCS)) and (sfMiCS[i] is not None):
-                    # Calcula FRs (Java faz (di+dj)/dist e depois adiciona (di+dj)/dist → acaba sendo a distância)
-                    frs = []
-                    for known in sfmicsConhecidos:
-                        di = known.getRadiusND()
+            for i in range(len(silhuetas)):
+                if (silhuetas[i] > 0) and (len(centroides[i].getPoints()) >= self.minWeight):
+                    silhuetasValidas.append(i)
+
+            sfMiCS: List[SPFMiC] = FuzzyFunctions.newSeparateExamplesByClusterClassifiedByFuzzyCMeans(
+                listaDesconhecidos, clusters, -1, self.supervisedModel.alpha, self.supervisedModel.theta,
+                self.minWeight, tempo
+            )
+            sfmicsConhecidos: List[SPFMiC] = self.supervisedModel.getAllSPFMiCs()
+            frs: List[float] = []
+
+            for i in range(len(centroides)):
+                if (i in silhuetasValidas) and (not sfMiCS[i].isNullFunc()):
+                    frs.clear()
+                    for j in range(len(sfmicsConhecidos)):
+                        di = sfmicsConhecidos[j].getRadiusND()
                         dj = sfMiCS[i].getRadiusND()
-                        distancia = calculaDistanciaEuclidiana(known.getCentroide(), sfMiCS[i].getCentroide())
-                        # replicando exatamente a álgebra do Java:
-                        denom = (di + dj) / (distancia if distancia != 0 else 1e-12)
-                        frs.append((di + dj) / denom)  # isso resulta em "distancia"
+                        # Atenção: aqui o Java calcula dist = (di + dj) / distEuclid ; depois usa frs.add((di+dj)/dist)
+                        dist_euclid = calculaDistanciaEuclidiana(sfmicsConhecidos[j].getCentroide(), sfMiCS[i].getCentroide())
+                        dist = (di + dj) / dist_euclid if dist_euclid != 0 else float('inf')
+                        frs.append((di + dj) / dist if dist != 0 else float('inf'))
 
-                    if frs:
+                    if len(frs) > 0:
                         minFr = min(frs)
                         indexMinFr = frs.index(minFr)
 
-                        # Exemplos pertencentes ao cluster i (equivalente a centroid.get(i).getPoints())
-                        exemplos_cluster_i = [ex for idx, ex in enumerate(listaDesconhecidos) if winners[idx] == i]
-
                         if minFr <= self.phi:
-                            # Atribui rótulo do conhecido mais próximo
+                            # Herdar rótulo conhecido
                             sfMiCS[i].setRotulo(sfmicsConhecidos[indexMinFr].getRotulo())
+                            examples: List[Example] = centroides[i].getPoints()
+                            rotulos = {}  # HashMap<Double, Integer> no Java
+                            for j in range(len(examples)):
+                                try:
+                                    listaDesconhecidos.remove(examples[j])
+                                except ValueError:
+                                    pass
 
-                            # Atualiza ConfusionMatrix e remove do buffer de desconhecidos
-                            rotulos = {}
-                            for ex in exemplos_cluster_i:
-                                # remove (como no Java)
-                                if ex in listaDesconhecidos:
-                                    listaDesconhecidos.remove(ex)
-
-                                trueLabel = ex.getRotuloVerdadeiro()
+                                trueLabel = examples[j].getRotuloVerdadeiro()
                                 predictedLabel = sfMiCS[i].getRotulo()
-                                OnlinePhase.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrix)
-                                # OnlinePhase.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrixOriginal)
+                                self.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrix)
+                                # self.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrixOriginal)
 
                                 rotulos[trueLabel] = rotulos.get(trueLabel, 0) + 1
 
                             # Maioria dos rótulos verdadeiros
-                            if rotulos:
-                                keys = list(rotulos.keys())
-                                maiorRotulo = max(keys, key=lambda k: rotulos[k])
-                            else:
-                                maiorRotulo = -1.0
+                            maiorValor = -float('inf')
+                            maiorRotulo = -1.0
+                            for key, val in rotulos.items():
+                                if maiorValor < val:
+                                    maiorValor = val
+                                    maiorRotulo = key
 
-                            # Só promove a conhecido se maioria bate com rótulo atribuído
                             if maiorRotulo == sfMiCS[i].getRotulo():
                                 sfMiCS[i].setRotuloReal(maiorRotulo)
                                 self.notSupervisedModel.spfMiCS.append(sfMiCS[i])
-
                         else:
-                            # NOVELTY
+                            # Novidade
                             self.existNovelty = True
                             sfMiCS[i].setRotulo(self.generateNPLabel())
-
+                            examples: List[Example] = centroides[i].getPoints()
                             rotulos = {}
-                            for ex in exemplos_cluster_i:
-                                if ex in listaDesconhecidos:
-                                    listaDesconhecidos.remove(ex)
+                            for j in range(len(examples)):
+                                try:
+                                    listaDesconhecidos.remove(examples[j])
+                                except ValueError:
+                                    pass
 
-                                trueLabel = ex.getRotuloVerdadeiro()
+                                trueLabel = examples[j].getRotuloVerdadeiro()
                                 predictedLabel = sfMiCS[i].getRotulo()
-                                OnlinePhase.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrix)
-                                # OnlinePhase.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrixOriginal)
+                                self.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrix)
+                                # self.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrixOriginal)
 
                                 rotulos[trueLabel] = rotulos.get(trueLabel, 0) + 1
 
-                            if rotulos:
-                                keys = list(rotulos.keys())
-                                maiorRotulo = max(keys, key=lambda k: rotulos[k])
-                            else:
-                                maiorRotulo = -1.0
+                            maiorValor = -float('inf')
+                            maiorRotulo = -1.0
+                            for key, val in rotulos.items():
+                                if maiorValor < val:
+                                    maiorValor = val
+                                    maiorRotulo = key
 
                             sfMiCS[i].setRotuloReal(maiorRotulo)
                             self.notSupervisedModel.spfMiCS.append(sfMiCS[i])
 
         return listaDesconhecidos
 
-    # ATENÇÃO: esta função espelha literalmente a implementação Java
-    def removeOldUnknown(self, unkMem, ts, ct):
-        newUnkMem = []
-        for ex in unkMem:
-            # Java mantém exemplos cujo (ct - time) >= ts
-            if (ct - ex.getTime()) >= ts:
-                newUnkMem.append(ex)
-        return newUnkMem
-
-    def generateNPLabel(self):
-        self.nPCount += 1.0
+    def generateNPLabel(self) -> float:
+        self.nPCount += 1
         return self.nPCount
 
+    def removeOldUnknown(self, unkMem: List[Example], ts: int, ct: int) -> List[Example]:
+        newUnkMem: List[Example] = []
+        for i in range(len(unkMem)):
+            if ct - unkMem[i].getTime() >= ts:
+                newUnkMem.append(unkMem[i])
+        return newUnkMem  # No Java, retorno é ignorado no caller
+
     @staticmethod
-    def updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrix: ConfusionMatrix):
+    def updateConfusionMatrix(trueLabel: float, predictedLabel: float, confusionMatrix: ConfusionMatrix):
         confusionMatrix.addInstance(trueLabel, predictedLabel)
         confusionMatrix.updateConfusionMatrix(trueLabel)
 
-    def getTamConfusion(self):
+    def getTamConfusion(self) -> int:
         return self.tamConfusion
 
-    def setTamConfusion(self, tam):
-        self.tamConfusion = tam
+    def setTamConfusion(self, tamConfusion: int):
+        self.tamConfusion = tamConfusion

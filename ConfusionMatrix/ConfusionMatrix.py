@@ -1,6 +1,9 @@
-import csv, os
+# ConfusionMatrix.py
+import os
+import csv
 from collections import defaultdict
 from typing import Dict, List
+
 from ConfusionMatrix.Metrics import Metrics
 
 class ConfusionMatrix:
@@ -10,49 +13,58 @@ class ConfusionMatrix:
 
     def addInstance(self, trueClass: float, predictedClass: float):
         if trueClass not in self.matrix:
-            self.addClass(trueClass)
+            self._addClass(trueClass)
         if predictedClass not in self.matrix:
-            self.addClass(predictedClass)
+            self._addClass(predictedClass)
 
-        self.matrix[trueClass][predictedClass] += 1
+        count = self.matrix[trueClass].get(predictedClass, 0)
+        self.matrix[trueClass][predictedClass] = count + 1
 
-    def addClass(self, classLabel: float):
-        if classLabel not in self.matrix:
-            self.matrix[classLabel] = {}
-            # cria linha completa
-            for other in list(self.matrix.keys()):
-                self.matrix[classLabel][other] = self.matrix[classLabel].get(other, 0)
-            # adiciona nova coluna em todas as outras linhas
-            for other in self.matrix.keys():
-                if other != classLabel:
-                    self.matrix[other][classLabel] = 0
+    def _addClass(self, classLabel: float):
+        self.matrix[classLabel] = {}
+        for otherClass in self.matrix.keys():
+            self.matrix[classLabel][otherClass] = self.matrix[classLabel].get(otherClass, 0)
+            self.matrix[otherClass][classLabel] = self.matrix[otherClass].get(classLabel, 0)
 
     def printMatrix(self):
         print("\nConfusion Matrix:")
         print("\t" + "\t".join(str(c) for c in self.matrix.keys()))
-        for trueClass, row in self.matrix.items():
-            print(str(trueClass) + "\t" + "\t".join(str(row.get(pred, 0)) for pred in self.matrix.keys()))
+        for trueClass in self.matrix.keys():
+            row = [str(self.matrix[trueClass].get(pred, 0)) for pred in self.matrix.keys()]
+            print(f"{trueClass}\t" + "\t".join(row))
 
     def saveMatrix(self, dataset: str, latencia: int, percentLabeled: float):
-        base = os.path.join(os.getcwd(), "datasets", dataset, "graphics_data")
-        os.makedirs(base, exist_ok=True)
-        path = os.path.join(base, f"{dataset}{latencia}-{percentLabeled}-matrix.csv")
+        current = os.path.abspath(".")
+        filePath = os.path.join(current, "datasets", dataset, "graphics_data",
+                                f"{dataset}{latencia}-{percentLabeled}-matrix.csv")
 
-        file_exists = os.path.exists(path)
-        with open(path, "a" if file_exists else "w", newline="") as f:
-            writer = csv.writer(f)
-            # Sempre escreve cabeçalho como no Java
-            writer.writerow(["Classes"] + list(self.matrix.keys()))
-            for trueClass, row in self.matrix.items():
-                writer.writerow([trueClass] + [row.get(pred, 0) for pred in self.matrix.keys()])
+        os.makedirs(os.path.dirname(filePath), exist_ok=True)
+        file_exists = os.path.isfile(filePath)
+
+        with open(filePath, "a" if file_exists else "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+
+            # cabeçalho
+            if not file_exists:
+                writer.writerow(["Classes"] + list(self.matrix.keys()))
+
+            # escreve matriz
+            for trueClass in self.matrix.keys():
+                row = [trueClass] + [self.matrix[trueClass].get(pred, 0) for pred in self.matrix.keys()]
+                writer.writerow(row)
 
     def getClassesWithNonZeroCount(self) -> Dict[float, List[float]]:
-        result = {}
-        for trueClass, row in self.matrix.items():
+        result: Dict[float, List[float]] = {}
+        for trueClass in self.matrix.keys():
             if 0 <= trueClass < 100:
-                nonZeroPreds = [pred for pred, count in row.items() if pred > 100 and count > 0]
-                if nonZeroPreds:
-                    result[trueClass] = nonZeroPreds
+                predictedNonZero = []
+                for predClass in self.matrix.keys():
+                    if predClass > 100:
+                        count = self.matrix[trueClass].get(predClass, 0)
+                        if count > 0:
+                            predictedNonZero.append(predClass)
+                if predictedNonZero:
+                    result[trueClass] = predictedNonZero
         return result
 
     def mergeClasses(self, labels: Dict[float, List[float]]):
@@ -60,51 +72,71 @@ class ConfusionMatrix:
             if srcLabel not in self.matrix:
                 continue
             row1 = self.matrix[srcLabel]
-            for dest in destLabels:
-                if dest in self.matrix and dest != srcLabel:
-                    row2 = self.matrix[dest]
+
+            for destLabel in destLabels:
+                if destLabel in self.matrix and srcLabel != destLabel:
+                    row2 = self.matrix[destLabel]
+
                     # soma linhas
-                    for col, v2 in row2.items():
-                        row1[col] = row1.get(col, 0) + v2
-                    # remove linha dest
-                    self.matrix.pop(dest, None)
+                    for column, value2 in row2.items():
+                        row1[column] = row1.get(column, 0) + value2
+
+                    # remove linha de destino
+                    self.matrix.pop(destLabel)
+
                     # soma colunas
-                    for row in self.matrix.values():
-                        if dest in row:
-                            v2 = row.pop(dest)
-                            row[srcLabel] = row.get(srcLabel, 0) + v2
-                    self.lastMerge[srcLabel] = dest
-        for src, dest in list(self.lastMerge.items()):
-            if dest in self.matrix:
-                self.mergeClasses({src: [dest]})
+                    for rowLabel, row in self.matrix.items():
+                        if destLabel in row:
+                            value2 = row.pop(destLabel)
+                            row[srcLabel] = row.get(srcLabel, 0) + value2
+
+                    self.lastMerge[srcLabel] = destLabel
+
+        # aplicar merges pendentes
+        for srcLabel, destLabel in self.lastMerge.items():
+            if destLabel in self.matrix:
+                self.mergeClasses({srcLabel: [destLabel]})
 
     def updateConfusionMatrix(self, trueLabel: float):
-        if trueLabel in self.matrix and -1.0 in self.matrix[trueLabel]:
-            self.matrix[trueLabel][-1.0] = max(0, self.matrix[trueLabel][-1.0] - 1)
+        # Remove 1 ocorrência do desconhecido (-1)
+        if -1.0 in self.matrix.get(trueLabel, {}):
+            self.matrix[trueLabel][-1.0] -= 1
 
     def calculateMetrics(self, tempo: int, unkMem: float, exc: float) -> Metrics:
-        tp = fp = fn = 0
         total = 0
-        for trueLabel, row in self.matrix.items():
-            for predLabel, count in row.items():
-                total += count
-                if trueLabel == predLabel:
-                    tp += count
-                else:
-                    # espelha a lógica Java: soma como FP e FN
-                    fp += count
-                    fn += count
+        tp_total = 0
 
-        tn = total - tp - fp - fn
-        accuracy = (tp + tn) / total if total > 0 else 0
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        unknownRate = (unkMem / exc) if exc > 0 else 0
+        precisions = []
+        recalls = []
+
+        for trueLabel, row in self.matrix.items():
+            tp_cls = row.get(trueLabel, 0)
+            fp_cls = sum(self.matrix[t].get(trueLabel, 0) for t in self.matrix if t != trueLabel)
+            fn_cls = sum(row[p] for p in row if p != trueLabel)
+
+            tp_total += tp_cls
+            total += sum(row.values())
+
+            prec = tp_cls / (tp_cls + fp_cls) if (tp_cls + fp_cls) > 0 else 0.0
+            rec = tp_cls / (tp_cls + fn_cls) if (tp_cls + fn_cls) > 0 else 0.0
+
+            precisions.append(prec)
+            recalls.append(rec)
+
+        accuracy = tp_total / total if total > 0 else 0.0
+        precision = sum(precisions) / len(precisions) if precisions else 0.0
+        recall = sum(recalls) / len(recalls) if recalls else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        unknownRate = (unkMem / exc) if exc > 0 else 0.0
+
         return Metrics(accuracy, precision, recall, f1, tempo, unkMem, unknownRate)
 
     def countUnknow(self) -> int:
-        return sum(row.get(-1.0, 0) for row in self.matrix.values())
+        count = 0
+        for row in self.matrix.values():
+            count += row.get(-1.0, 0)
+        return count
 
     def getNumberOfClasses(self) -> int:
         return len(self.matrix)

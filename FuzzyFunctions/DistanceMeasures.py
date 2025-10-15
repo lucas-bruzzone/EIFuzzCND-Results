@@ -1,23 +1,24 @@
 import numpy as np
-from typing import List
+from typing import List, Union
+from Structs.Example import Example
 
-def calculaDistanciaEuclidiana(ponto1, ponto2: List[float]) -> float:
+def calculaDistanciaEuclidiana(ponto1: Union[Example, List[float], np.ndarray],
+                               ponto2: Union[List[float], np.ndarray]) -> float:
     """
-    Versão única (como no Java).
-    Aceita:
-      - ponto1 como lista/array de floats
-      - ponto1 como Example (ou objeto com getPonto / ponto / get_point)
-    E ponto2 sempre como lista/array de floats
+    Versão fiel ao Java:
+    - Se ponto1 é Example: usa .getPonto()
+    - Se ponto1 é array-like: usa diretamente
+    - Sempre calcula distância Euclidiana por soma de quadrados + sqrt (sem np.linalg.norm)
     """
-    if hasattr(ponto1, 'getPonto'):
-        arr = ponto1.getPonto()
-    elif hasattr(ponto1, 'ponto'):
-        arr = ponto1.ponto
-    elif hasattr(ponto1, 'get_point'):
-        arr = ponto1.get_point()
+    if isinstance(ponto1, Example):
+        a = np.array(ponto1.getPonto(), dtype=float)
     else:
-        arr = ponto1
+        a = np.array(ponto1, dtype=float)
 
-    a = np.array(arr, dtype=float)
     b = np.array(ponto2, dtype=float)
-    return float(np.linalg.norm(a - b))
+
+    somatorio = 0.0
+    for i in range(len(a)):
+        somatorio += (a[i] - b[i]) ** 2
+
+    return float(np.sqrt(somatorio))

@@ -3,16 +3,21 @@ from FuzzyFunctions.DistanceMeasures import calculaDistanciaEuclidiana
 from Structs.Example import Example
 
 class SPFMiC:
-    def __init__(self, centroide, N, alpha, theta, t):
-        self.CF1pertinencias = np.array(centroide, dtype=float).copy()
-        self.CF1tipicidades = np.array(centroide, dtype=float).copy()
+    def __init__(self, centroide: np.ndarray, N: int, alpha: float, theta: float, t: int):
+        # No Java: CF1 começam zerados
+        self.CF1pertinencias = np.zeros_like(centroide, dtype=float)
+        self.CF1tipicidades = np.zeros_like(centroide, dtype=float)
+
+        # No Java: Me e Te começam em 0
         self.Me = 1.0
         self.Te = 1.0
         self.SSDe = 0.0
         self.N = float(N)
+
         self.t = float(t)
         self.updated = float(t)
         self.created = float(t)
+
         self.rotulo = -1.0
         self.rotuloReal = -1.0
         self.centroide = np.array(centroide, dtype=float).copy()
@@ -95,7 +100,7 @@ class SPFMiC:
         for i in range(nAtributos):
             self.centroide[i] = (
                 (self.alpha * self.CF1pertinencias[i] + self.theta * self.CF1tipicidades[i])
-                / (self.alpha * self.Te + self.theta * self.Me)
+                / (self.alpha * self.Te + self.theta * self.Me if (self.alpha * self.Te + self.theta * self.Me) != 0 else 1e-12)
             )
 
     def atribuiExemplo(self, exemplo: Example, pertinencia: float, tipicidade: float):
@@ -113,9 +118,8 @@ class SPFMiC:
         gamma_i = self.getGamma(K)
         dist = calculaDistanciaEuclidiana(exemplo, self.centroide)
 
-        # Proteção contra divisão por zero
-        if n <= 1:
-            return 1.0
+        if n <= 1 or gamma_i == 0:
+            return 0.0
 
         expoente = 1.0 / (n - 1.0)
         return 1.0 / (1.0 + pow(((self.theta / (gamma_i if gamma_i != 0 else 1e-12)) * dist), expoente))
