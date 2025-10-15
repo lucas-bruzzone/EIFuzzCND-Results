@@ -19,10 +19,6 @@ class SupervisedModel:
         self.knowLabels: List[float] = []
 
     def trainInitialModel(self, trainSet) -> None:
-        """
-        trainSet: sequência de linhas (np.ndarray, list), onde a última coluna é o rótulo.
-        Em Java, era Instances -> aqui convertemos para Example(...) com isLabeled=True.
-        """
         chunk: List[Example] = []
         arr = np.asarray(trainSet)
         for i in range(arr.shape[0]):
@@ -36,7 +32,6 @@ class SupervisedModel:
         examplesByClass = FuzzyFunctions.separateByClasses(chunk)
         classes: List[float] = list(examplesByClass.keys())
 
-        classes: List[float] = list(examplesByClass.keys())
         print("\n=== DEBUG: classes detectadas ===", classes)
 
         for j in range(len(examplesByClass)):
@@ -46,14 +41,14 @@ class SupervisedModel:
                 if cls not in self.knowLabels:
                     self.knowLabels.append(cls)
 
-                cntr, u = FuzzyFunctions.fuzzyCMeans(lst, self.K, self.fuzzification)
+                clusters = FuzzyFunctions.fuzzyCMeans(lst, self.K, self.fuzzification)
 
                 print(f"\n=== DEBUG: Clustering classe {cls} ===")
-                print("Centroides:\n", cntr)
-                print("Pertinência (primeiras 5 colunas):\n", u[:, :min(5, u.shape[1])])
+                print("Centroides:\n", clusters.centroids)
+                print("Pertinência (primeiras 5 colunas):\n", clusters.membership[:, :min(5, clusters.membership.shape[1])])
 
                 spfmics = FuzzyFunctions.separateExamplesByClusterClassifiedByFuzzyCMeans(
-                    lst, cntr, u, cls, self.alpha, self.theta, self.minWeight, 0
+                    lst, clusters.centroids, clusters.membership, cls, self.alpha, self.theta, self.minWeight, 0
                 )
 
                 print(f"SPFMiCs criados para classe {cls}:")
@@ -71,7 +66,6 @@ class SupervisedModel:
     def getAllSPFMiCsFromClassifier(self, classifier: Dict[float, List[SPFMiC]]) -> List[SPFMiC]:
         spfMiCS: List[SPFMiC] = []
         keys: List[float] = list(classifier.keys())
-        # Java itera por índice sobre size
         for i in range(len(classifier)):
             spfMiCS.extend(classifier[keys[i]])
         return spfMiCS
@@ -132,7 +126,7 @@ class SupervisedModel:
                     self.knowLabels.append(cls)
                 clusters = FuzzyFunctions.fuzzyCMeans(lst, self.K, self.fuzzification)
                 spfmics = FuzzyFunctions.separateExamplesByClusterClassifiedByFuzzyCMeans(
-                    lst, clusters, cls, self.theta, self.alpha, self.minWeight, t
+                    lst, clusters.centroids, clusters.membership, cls, self.alpha, self.theta, self.minWeight, t
                 )
                 classifier_local[cls] = spfmics
             else:
@@ -141,9 +135,8 @@ class SupervisedModel:
         return newChunk
 
     def removeOldSPFMiCs(self, ts: int, currentTime: int) -> None:
-        # percorre cada classe conhecida
         for cls, spfMiCSatuais in SupervisedModel.classifier.items():
-            spfMiCSAux = list(spfMiCSatuais)  # cópia
+            spfMiCSAux = list(spfMiCSatuais)
             for spf in spfMiCSatuais:
                 if (currentTime - spf.getT() > ts) and (currentTime - spf.getUpdated() > ts):
                     try:

@@ -5,35 +5,59 @@ from FuzzyFunctions.DistanceMeasures import calculaDistanciaEuclidiana
 from Structs.Example import Example
 from Structs.SPFMiC import SPFMiC
 
+
+class FuzzyClusterResult:
+    """Wrapper para compatibilidade com Java FuzzyKMeansClusterer"""
+    def __init__(self, centroids: np.ndarray, membership: np.ndarray, examples: List[Example]):
+        self.centroids = centroids
+        self.membership = membership
+        self._examples = examples
+        self._clusters_cache = None
+    
+    def getClusters(self):
+        """Retorna lista de clusters com centroides e pontos"""
+        if self._clusters_cache is not None:
+            return self._clusters_cache
+        
+        clusters = []
+        for i in range(self.centroids.shape[0]):
+            indices = [j for j in range(self.membership.shape[1]) 
+                      if np.argmax(self.membership[:, j]) == i]
+            points = [self._examples[j] for j in indices]
+            
+            cluster = {
+                'centroid': self.centroids[i],
+                'points': points
+            }
+            clusters.append(cluster)
+        
+        self._clusters_cache = clusters
+        return clusters
+
+
 class FuzzyFunctions:
     @staticmethod
     def fuzzyCMeans(examples: List[Example], K: int, fuzzification: float):
-        data = np.array([ex.getPonto() for ex in examples]).T  # shape: features x samples
+        data = np.array([ex.getPonto() for ex in examples]).T
         cntr, u, _, _, _, _, _ = fuzz.cluster.cmeans(
             data, c=K, m=fuzzification, error=1e-6, maxiter=1000, init=None
         )
-        # Wrap em objeto que imita Java
-        return cntr, u
+        return FuzzyClusterResult(cntr, u, examples)
 
     @staticmethod
     def getFirstAndSecondBiggerPertinence(valores: np.ndarray, j: int = 0):
-        """
-        Versão fiel ao Java:
-        Retorna a maior e a segunda maior pertinência de um array.
-        O parâmetro 'j' é mantido apenas para compatibilidade, mas não é usado.
-        """
         lista = sorted(valores, reverse=True)
         if len(lista) < 2:
             return (lista[0], 0.0) if lista else (0.0, 0.0)
         return lista[0], lista[1]
 
     @staticmethod
-    def fuzzySilhouette(clusterer: dict, exemplos: List[Example], alpha: float):
-        u = clusterer["membership"]  # shape (c, n)
+    def fuzzySilhouette(clusterer: FuzzyClusterResult, exemplos: List[Example], alpha: float):
+        u = clusterer.membership
         nExemplos = u.shape[1]
         silhuetas = []
 
-        for i in range(u.shape[0]):  # clusters
+        for i in range(u.shape[0]):
             numerador = denominador = 0.0
             for j in range(nExemplos):
                 indexClasse = np.argmax(u[:, j])
@@ -49,10 +73,7 @@ class FuzzyFunctions:
                     if dqj:
                         bpj: float = min(dqj)
                         sj: float = (bpj - apj) / max(apj, bpj)
-
-                        # Agora chamando a função auxiliar, como no Java
                         upj, uqj = FuzzyFunctions.getFirstAndSecondBiggerPertinence(u[:, j], j)
-
                         numerador += ((upj - uqj) ** alpha) * sj
                         denominador += (upj - uqj) ** alpha
             fs: float = numerador / denominador if denominador != 0 else 0.0
@@ -60,19 +81,7 @@ class FuzzyFunctions:
         return silhuetas
 
     @staticmethod
-    def getFirstAndSecondBiggerPertinence(valores: np.ndarray, j: int):
-        """
-        Versão fiel ao Java:
-        Retorna a maior e a segunda maior pertinência de um array.
-        """
-        lista = sorted(valores, reverse=True)
-        if len(lista) < 2:
-            return (lista[0], 0.0) if lista else (0.0, 0.0)
-        return lista[0], lista[1]
-
-    @staticmethod
     def calculaTipicidade(membership_matrix: np.ndarray):
-        # membership_matrix: shape (n, k) como no Java
         n, k = membership_matrix.shape
         typicality = np.zeros((n, k))
         for i in range(n):
@@ -92,53 +101,50 @@ class FuzzyFunctions:
             minWeight: int,
             t: int
     ) -> List[SPFMiC]:
-        """
-        Espelha a versão Java:
-        - exemplos: lista de Example
-        - cntr: centroides (K × atributos)
-        - u: matriz de pertinência (K × nExemplos)
-        - rotulo: classe associada
-        - alpha, theta: parâmetros fuzzy
-        - minWeight: peso mínimo para validar cluster
-        - t: tempo inicial
-        """
-        # matriz de tipicidade (equivalente ao calculaTipicidade no Java)
         matrizTipicidade = FuzzyFunctions.calculaTipicidade(u.T)
-
         sfMiCS: List[SPFMiC] = []
 
         for j, centroide in enumerate(cntr):
+            # PRIMEIRO: conta quantos pontos pertencem a este cluster
+            indices_do_cluster = [k for k in range(len(exemplos)) if np.argmax(u[:, k]) == j]
+            nClusterPoints = len(indices_do_cluster)
+            
+            if nClusterPoints == 0:
+                continue
+            
             spfmic = None
             SSDe, Me, Te = 0.0, 0.0, 0.0
             CF1pertinencias = np.zeros_like(centroide)
             CF1tipicidades = np.zeros_like(centroide)
-            nClusterPoints = 0
+            primeiro_ponto = True
 
-            for k, ex in enumerate(exemplos):
-                indiceMaior = np.argmax(u[:, k])  # índice do cluster mais provável
-                if indiceMaior == j:
-                    valorPert = u[j, k]
-                    valorTip = matrizTipicidade[k][j]
-                    ponto = np.array(ex.getPonto(), dtype=float)
-                    nClusterPoints += 1
+            for k in indices_do_cluster:
+                ex = exemplos[k]
+                valorPert = u[j, k]
+                valorTip = matrizTipicidade[k][j]
+                ponto = np.array(ex.getPonto(), dtype=float)
 
-                    if spfmic is None:
-                        # cria SPFMiC inicial
-                        spfmic = SPFMiC(centroide, nClusterPoints, alpha, theta, t)
-                        spfmic.setRotulo(rotulo)
+                if spfmic is None:
+                    # N = tamanho TOTAL do cluster (como no Java)
+                    spfmic = SPFMiC(centroide, nClusterPoints, alpha, theta, t)
+                    spfmic.setRotulo(rotulo)
 
-                    dist = calculaDistanciaEuclidiana(centroide, ponto)
+                dist = calculaDistanciaEuclidiana(centroide, ponto)
 
-                    # acumula valores
+                Me += valorPert ** alpha
+                Te += valorTip ** theta
+                SSDe += valorPert * (dist ** 2)
+
+                if not primeiro_ponto:
                     CF1pertinencias += ponto * valorPert
                     CF1tipicidades += ponto * valorTip
-                    Me += valorPert ** alpha
-                    Te += valorTip ** theta
-                    SSDe += valorPert * (dist ** 2)
+                else:
+                    primeiro_ponto = False
 
-            # valida se cluster foi criado
             if spfmic is not None and nClusterPoints >= minWeight:
-                # soma valores acumulados ao SPFMiC
+                CF1pertinencias += spfmic.getCF1pertinencias()
+                CF1tipicidades += spfmic.getCF1tipicidades()
+                
                 spfmic.setSSDe(SSDe)
                 spfmic.setMe(Me)
                 spfmic.setTe(Te)
@@ -151,39 +157,35 @@ class FuzzyFunctions:
     @staticmethod
     def newSeparateExamplesByClusterClassifiedByFuzzyCMeans(
             exemplos: List[Example],
-            clusterer: dict,
+            clusterer: FuzzyClusterResult,
             rotulo: float,
             alpha: float,
             theta: float,
             minWeight: int,
             t: int
     ) -> List[SPFMiC]:
-        cntr, u = clusterer["centroids"], clusterer["membership"]
+        centroides_list = clusterer.getClusters()
+        u = clusterer.membership
         sfMiCS = []
 
-        for j, centroide in enumerate(cntr):
+        for j, cluster_info in enumerate(centroides_list):
             spfmic = None
             SSD = 0.0
-            nClusterPoints = 0
+            examples = cluster_info['points']
+            nClusterPoints = len(examples)
 
-            for k, ex in enumerate(exemplos):
-                indiceMaior = np.argmax(u[:, k])
-                if indiceMaior == j:
-                    valorPert = u[j, k]
-                    ponto = ex.getPonto()
-                    nClusterPoints += 1
+            if nClusterPoints > 0:
+                spfmic = SPFMiC(cluster_info['centroid'], nClusterPoints, alpha, theta, t)
+                spfmic.setRotulo(rotulo)
 
-                    if spfmic is None:
-                        spfmic = SPFMiC(centroide, nClusterPoints, alpha, theta, t)
-                        spfmic.setRotulo(rotulo)
-
-                    dist = calculaDistanciaEuclidiana(centroide, ponto)
+                for ex in examples:
+                    indexExample = exemplos.index(ex)
+                    valorPert = u[j, indexExample]
+                    dist = calculaDistanciaEuclidiana(cluster_info['centroid'], ex.getPonto())
                     SSD += valorPert * (dist ** 2)
 
-            if spfmic is not None:
-                if spfmic.getN() >= minWeight:
+                if nClusterPoints >= minWeight:
                     spfmic.setSSDe(SSD)
-                # mesmo se não atingir minWeight, ainda adiciona
                 sfMiCS.append(spfmic)
 
         return sfMiCS

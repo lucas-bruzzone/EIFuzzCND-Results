@@ -42,29 +42,23 @@ class OnlinePhase:
         self.tamConfusion = 0
 
     def initialize(self, dataset: str):
-        # Intermediária
         esperandoTempo = None
         nExeTemp = 0
 
-        # ConfusionMatrix
         confusionMatrix = ConfusionMatrix()
         confusionMatrixOriginal = ConfusionMatrix()
         append = False
         listaMetricas: List[Metrics] = []
 
-        # Carrega .arff de forma equivalente ao DataSource do Weka
-        # Java: caminho + dataset + "-instances.arff"
         path = f"{self.caminho}{dataset}-instances.arff"
         if arff is None or pd is None:
             raise RuntimeError("scipy.io.arff e pandas são necessários para ler ARFF.")
 
         data_np, meta = arff.loadarff(path)
         df = pd.DataFrame(data_np)
-        # Assume que a última coluna é a classe (como data.setClassIndex(numAttributes()-1))
-        values = df.values  # shape: (n, d)
-        data = values  # usando array numpy como 'Instances'
+        values = df.values
+        data = values
 
-        # Intermediária
         esperandoTempo = data
         labeledMem: List[Example] = []
         trueLabels: Set[float] = set()
@@ -74,10 +68,8 @@ class OnlinePhase:
         for tempo in range(data.shape[0]):
             ins_array = np.asarray(data[tempo], dtype=float)
 
-            # Cria Example com rótulo verdadeiro (última coluna)
             exemplo = Example(ins_array, True, tempo)
 
-            # classifica com modelo supervisionado (Java passa Instance; aqui passamos o vetor)
             rotulo = self.supervisedModel.classifyNew(ins_array, tempo)
             exemplo.setRotuloClassificado(rotulo)
 
@@ -96,7 +88,6 @@ class OnlinePhase:
 
             self.results.append(exemplo)
             confusionMatrix.addInstance(exemplo.getRotuloVerdadeiro(), exemplo.getRotuloClassificado())
-            # confusionMatrixOriginal.addInstance(...)
 
             tempoLatencia += 1
             if tempoLatencia >= self.latencia:
@@ -111,10 +102,8 @@ class OnlinePhase:
                 nExeTemp += 1
 
             self.supervisedModel.removeOldSPFMiCs(self.latencia + self.ts, tempo)
-            # self.notSupervisedModel.removeOldSPFMiCs(self.latencia + self.ts, tempo)
-            self.removeOldUnknown(unkMem, self.ts, tempo)  # manter o “bug” de ignorar retorno, como no Java
+            self.removeOldUnknown(unkMem, self.ts, tempo)
 
-            # Métricas a cada 'divisor'
             if (tempo > 0) and (tempo % int(self.divisor) == 0):
                 confusionMatrix.mergeClasses(confusionMatrix.getClassesWithNonZeroCount())
                 metrics: Metrics = confusionMatrix.calculateMetrics(tempo, confusionMatrix.countUnknow(), self.divisor)
@@ -128,7 +117,6 @@ class OnlinePhase:
                     self.novelties.append(0.0)
 
         for metrica in listaMetricas:
-            # no Java: metrica.getTempo()/divisor depois cast para int
             tempo_idx = int(metrica.getTempo() / self.divisor)
             HandlesFiles.salvaMetrics(
                 tempo_idx,
@@ -153,12 +141,12 @@ class OnlinePhase:
                                    confusionMatrixOriginal: ConfusionMatrix) -> List[Example]:
         if len(listaDesconhecidos) > self.kShort:
             clusters = FuzzyFunctions.fuzzyCMeans(listaDesconhecidos, self.kShort, self.supervisedModel.fuzzification)
-            centroides = clusters.getClusters()
+            centroides_list = clusters.getClusters()
             silhuetas = FuzzyFunctions.fuzzySilhouette(clusters, listaDesconhecidos, self.supervisedModel.alpha)
             silhuetasValidas: List[int] = []
 
             for i in range(len(silhuetas)):
-                if (silhuetas[i] > 0) and (len(centroides[i].getPoints()) >= self.minWeight):
+                if (silhuetas[i] > 0) and (len(centroides_list[i]['points']) >= self.minWeight):
                     silhuetasValidas.append(i)
 
             sfMiCS: List[SPFMiC] = FuzzyFunctions.newSeparateExamplesByClusterClassifiedByFuzzyCMeans(
@@ -168,13 +156,12 @@ class OnlinePhase:
             sfmicsConhecidos: List[SPFMiC] = self.supervisedModel.getAllSPFMiCs()
             frs: List[float] = []
 
-            for i in range(len(centroides)):
+            for i in range(len(centroides_list)):
                 if (i in silhuetasValidas) and (not sfMiCS[i].isNullFunc()):
                     frs.clear()
                     for j in range(len(sfmicsConhecidos)):
                         di = sfmicsConhecidos[j].getRadiusND()
                         dj = sfMiCS[i].getRadiusND()
-                        # Atenção: aqui o Java calcula dist = (di + dj) / distEuclid ; depois usa frs.add((di+dj)/dist)
                         dist_euclid = calculaDistanciaEuclidiana(sfmicsConhecidos[j].getCentroide(), sfMiCS[i].getCentroide())
                         dist = (di + dj) / dist_euclid if dist_euclid != 0 else float('inf')
                         frs.append((di + dj) / dist if dist != 0 else float('inf'))
@@ -184,10 +171,9 @@ class OnlinePhase:
                         indexMinFr = frs.index(minFr)
 
                         if minFr <= self.phi:
-                            # Herdar rótulo conhecido
                             sfMiCS[i].setRotulo(sfmicsConhecidos[indexMinFr].getRotulo())
-                            examples: List[Example] = centroides[i].getPoints()
-                            rotulos = {}  # HashMap<Double, Integer> no Java
+                            examples: List[Example] = centroides_list[i]['points']
+                            rotulos = {}
                             for j in range(len(examples)):
                                 try:
                                     listaDesconhecidos.remove(examples[j])
@@ -197,11 +183,9 @@ class OnlinePhase:
                                 trueLabel = examples[j].getRotuloVerdadeiro()
                                 predictedLabel = sfMiCS[i].getRotulo()
                                 self.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrix)
-                                # self.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrixOriginal)
 
                                 rotulos[trueLabel] = rotulos.get(trueLabel, 0) + 1
 
-                            # Maioria dos rótulos verdadeiros
                             maiorValor = -float('inf')
                             maiorRotulo = -1.0
                             for key, val in rotulos.items():
@@ -213,10 +197,9 @@ class OnlinePhase:
                                 sfMiCS[i].setRotuloReal(maiorRotulo)
                                 self.notSupervisedModel.spfMiCS.append(sfMiCS[i])
                         else:
-                            # Novidade
                             self.existNovelty = True
                             sfMiCS[i].setRotulo(self.generateNPLabel())
-                            examples: List[Example] = centroides[i].getPoints()
+                            examples: List[Example] = centroides_list[i]['points']
                             rotulos = {}
                             for j in range(len(examples)):
                                 try:
@@ -227,7 +210,6 @@ class OnlinePhase:
                                 trueLabel = examples[j].getRotuloVerdadeiro()
                                 predictedLabel = sfMiCS[i].getRotulo()
                                 self.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrix)
-                                # self.updateConfusionMatrix(trueLabel, predictedLabel, confusionMatrixOriginal)
 
                                 rotulos[trueLabel] = rotulos.get(trueLabel, 0) + 1
 
@@ -252,7 +234,7 @@ class OnlinePhase:
         for i in range(len(unkMem)):
             if ct - unkMem[i].getTime() >= ts:
                 newUnkMem.append(unkMem[i])
-        return newUnkMem  # No Java, retorno é ignorado no caller
+        return newUnkMem
 
     @staticmethod
     def updateConfusionMatrix(trueLabel: float, predictedLabel: float, confusionMatrix: ConfusionMatrix):
