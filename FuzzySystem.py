@@ -5,8 +5,11 @@ from scipy.io import arff
 from Phases.OfflinePhase import OfflinePhase
 from Phases.OnlinePhase import OnlinePhase
 from typing import List
+import random
 
 def main():
+    random.seed(42)
+    np.random.seed(42)
     dataset = "rbf"  # mesmo nome do Java
     caminho = os.path.join(os.getcwd(), "datasets", dataset, "")
 
